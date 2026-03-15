@@ -31,7 +31,7 @@ jobs:
           node-version: '20'
 
       - name: 🤖 Setup Android SDK
-        uses: android-actions/setup-android@v3  # يُضيف sdkmanager للـ PATH تلقائياً
+        uses: android-actions/setup-android@v3
 
       - name: 📦 Accept SDK licenses & install platforms
         run: |
@@ -57,9 +57,9 @@ jobs:
         run: |
           PKG="android/app/src/main/java/com/aurora/player"
           mkdir -p "$PKG"
-          cp android-plugins/src/main/java/com/aurora/player/*.java "$PKG/"
+          cp android-plugins/src/main/java/com/aurora/player/*.java "$PKG/" 2>/dev/null || echo "⚠️ No plugins found, continuing..."
           echo "✅ Plugins copied:"
-          ls "$PKG/"
+          ls -la "$PKG/" || echo "Directory empty"
 
       # ─────────────────────────────────────────────
       # 5. AndroidManifest.xml — صلاحيات + MediaService
@@ -67,15 +67,26 @@ jobs:
       - name: 📝 Patch AndroidManifest.xml
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-
-          if ! grep -q "FOREGROUND_SERVICE" "$MANIFEST"; then
-            sed -i 's|<uses-permission android:name="android.permission.INTERNET" />|<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />|' "$MANIFEST"
-            echo "✅ Permissions added"
+          
+          if [ ! -f "$MANIFEST" ]; then
+            echo "❌ AndroidManifest.xml not found at $MANIFEST"
+            exit 1
           fi
 
+          # إضافة الصلاحيات المطلوبة
+          if ! grep -q "android.permission.FOREGROUND_SERVICE" "$MANIFEST"; then
+            sed -i 's|<uses-permission android:name="android.permission.INTERNET" />|<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />|' "$MANIFEST"
+            echo "✅ Permissions added"
+          else
+            echo "ℹ️ Permissions already exist"
+          fi
+
+          # تسجيل MediaService
           if ! grep -q "MediaService" "$MANIFEST"; then
             sed -i 's|</application>|        <service\n            android:name="com.aurora.player.MediaService"\n            android:foregroundServiceType="mediaPlayback"\n            android:exported="false" />\n    </application>|' "$MANIFEST"
             echo "✅ MediaService registered"
+          else
+            echo "ℹ️ MediaService already registered"
           fi
 
       # ─────────────────────────────────────────────
@@ -83,12 +94,22 @@ jobs:
       # ─────────────────────────────────────────────
       - name: 🔧 Register plugins in MainActivity
         run: |
-          MAIN=$(find android -name "MainActivity.java" | head -1)
+          MAIN=$(find android -name "MainActivity.java" -type f | head -1)
+          
+          if [ -z "$MAIN" ]; then
+            echo "⚠️ MainActivity.java not found, skipping plugin registration"
+            exit 0
+          fi
 
           if ! grep -q "AuroraMediaPlugin" "$MAIN"; then
+            # إضافة الـ imports
             sed -i 's|import com.getcapacitor.BridgeActivity;|import com.getcapacitor.BridgeActivity;\nimport com.aurora.player.AuroraMediaPlugin;\nimport com.aurora.player.AuroraFilesPlugin;|' "$MAIN"
+            
+            # إضافة تسجيل الـ Plugins في onCreate
             sed -i 's|public class MainActivity extends BridgeActivity {|public class MainActivity extends BridgeActivity {\n  @Override\n  public void onCreate(android.os.Bundle savedInstanceState) {\n    registerPlugin(AuroraMediaPlugin.class);\n    registerPlugin(AuroraFilesPlugin.class);\n    super.onCreate(savedInstanceState);\n  }|' "$MAIN"
             echo "✅ Plugins registered"
+          else
+            echo "ℹ️ Plugins already registered"
           fi
 
       # ─────────────────────────────────────────────
@@ -97,9 +118,17 @@ jobs:
       - name: 📦 Add androidx.media dependency
         run: |
           BUILD="android/app/build.gradle"
+          
+          if [ ! -f "$BUILD" ]; then
+            echo "❌ build.gradle not found"
+            exit 1
+          fi
+          
           if ! grep -q "androidx.media:media" "$BUILD"; then
             sed -i '/^dependencies {/a\    implementation "androidx.media:media:1.7.0"' "$BUILD"
             echo "✅ androidx.media:media added"
+          else
+            echo "ℹ️ androidx.media:media already present"
           fi
 
       # ─────────────────────────────────────────────
@@ -110,7 +139,6 @@ jobs:
 
       - name: 🔨 Build Debug APK
         run: |
-          # ضبط الذاكرة في gradle.properties لضمان الاستجابة
           echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m" >> android/gradle.properties
           echo "org.gradle.daemon=false" >> android/gradle.properties
           cd android
@@ -122,8 +150,13 @@ jobs:
       - name: ✅ Verify APK
         run: |
           APK="android/app/build/outputs/apk/debug/app-debug.apk"
-          SIZE=$(du -sh "$APK" | cut -f1)
-          echo "✅ APK ready — $SIZE"
+          if [ -f "$APK" ]; then
+            SIZE=$(du -sh "$APK" | cut -f1)
+            echo "✅ APK ready — $SIZE"
+          else
+            echo "❌ APK not found at $APK"
+            exit 1
+          fi
 
       - name: 📤 Upload APK artifact
         uses: actions/upload-artifact@v4
