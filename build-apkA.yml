@@ -1,0 +1,133 @@
+name: 🎵 Build Aurora Player APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ─────────────────────────────────────────────
+      # 1. استرجاع الكود
+      # ─────────────────────────────────────────────
+      - name: ⬇️ Checkout code
+        uses: actions/checkout@v4
+
+      # ─────────────────────────────────────────────
+      # 2. بيئة البناء
+      # ─────────────────────────────────────────────
+      - name: ☕ Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 🟢 Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 🤖 Setup Android SDK
+        uses: android-actions/setup-android@v3  # يُضيف sdkmanager للـ PATH تلقائياً
+
+      - name: 📦 Accept SDK licenses & install platforms
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" --quiet
+
+      # ─────────────────────────────────────────────
+      # 3. Capacitor
+      # ─────────────────────────────────────────────
+      - name: 📦 npm install
+        run: npm install
+
+      - name: ➕ Add Android platform
+        run: npx cap add android 2>/dev/null || true
+
+      - name: 🔄 Sync Capacitor
+        run: npx cap sync android
+
+      # ─────────────────────────────────────────────
+      # 4. نسخ Java Plugins
+      # ─────────────────────────────────────────────
+      - name: 🔌 Copy native Java plugins
+        run: |
+          PKG="android/app/src/main/java/com/aurora/player"
+          mkdir -p "$PKG"
+          cp android-plugins/src/main/java/com/aurora/player/*.java "$PKG/"
+          echo "✅ Plugins copied:"
+          ls "$PKG/"
+
+      # ─────────────────────────────────────────────
+      # 5. AndroidManifest.xml — صلاحيات + MediaService
+      # ─────────────────────────────────────────────
+      - name: 📝 Patch AndroidManifest.xml
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+
+          if ! grep -q "FOREGROUND_SERVICE" "$MANIFEST"; then
+            sed -i 's|<uses-permission android:name="android.permission.INTERNET" />|<uses-permission android:name="android.permission.INTERNET" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />\n    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />\n    <uses-permission android:name="android.permission.WAKE_LOCK" />\n    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />\n    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />|' "$MANIFEST"
+            echo "✅ Permissions added"
+          fi
+
+          if ! grep -q "MediaService" "$MANIFEST"; then
+            sed -i 's|</application>|        <service\n            android:name="com.aurora.player.MediaService"\n            android:foregroundServiceType="mediaPlayback"\n            android:exported="false" />\n    </application>|' "$MANIFEST"
+            echo "✅ MediaService registered"
+          fi
+
+      # ─────────────────────────────────────────────
+      # 6. MainActivity — تسجيل Plugins
+      # ─────────────────────────────────────────────
+      - name: 🔧 Register plugins in MainActivity
+        run: |
+          MAIN=$(find android -name "MainActivity.java" | head -1)
+
+          if ! grep -q "AuroraMediaPlugin" "$MAIN"; then
+            sed -i 's|import com.getcapacitor.BridgeActivity;|import com.getcapacitor.BridgeActivity;\nimport com.aurora.player.AuroraMediaPlugin;\nimport com.aurora.player.AuroraFilesPlugin;|' "$MAIN"
+            sed -i 's|public class MainActivity extends BridgeActivity {|public class MainActivity extends BridgeActivity {\n  @Override\n  public void onCreate(android.os.Bundle savedInstanceState) {\n    registerPlugin(AuroraMediaPlugin.class);\n    registerPlugin(AuroraFilesPlugin.class);\n    super.onCreate(savedInstanceState);\n  }|' "$MAIN"
+            echo "✅ Plugins registered"
+          fi
+
+      # ─────────────────────────────────────────────
+      # 7. build.gradle — androidx.media:media
+      # ─────────────────────────────────────────────
+      - name: 📦 Add androidx.media dependency
+        run: |
+          BUILD="android/app/build.gradle"
+          if ! grep -q "androidx.media:media" "$BUILD"; then
+            sed -i '/^dependencies {/a\    implementation "androidx.media:media:1.7.0"' "$BUILD"
+            echo "✅ androidx.media:media added"
+          fi
+
+      # ─────────────────────────────────────────────
+      # 8. بناء APK
+      # ─────────────────────────────────────────────
+      - name: 🔑 Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: 🔨 Build Debug APK
+        run: |
+          # ضبط الذاكرة في gradle.properties لضمان الاستجابة
+          echo "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=512m" >> android/gradle.properties
+          echo "org.gradle.daemon=false" >> android/gradle.properties
+          cd android
+          ./gradlew assembleDebug --stacktrace
+
+      # ─────────────────────────────────────────────
+      # 9. رفع APK
+      # ─────────────────────────────────────────────
+      - name: ✅ Verify APK
+        run: |
+          APK="android/app/build/outputs/apk/debug/app-debug.apk"
+          SIZE=$(du -sh "$APK" | cut -f1)
+          echo "✅ APK ready — $SIZE"
+
+      - name: 📤 Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aurora-Player-v60-Debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
